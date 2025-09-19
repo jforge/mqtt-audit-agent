@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt-audit-agent
+  labels:
+    app: mqtt-audit-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mqtt-audit-agent
+  template:
+    metadata:
+      labels:
+        app: mqtt-audit-agent
+    spec:
+      containers:
+        - name: agent
+          image: ghcr.io/your-org/mqtt-audit-agent:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BROKER_URL
+              value: "tcp://mqtt-broker.default.svc.cluster.local:1883"
+            - name: CLIENT_ID
+              value: "audit-agent-1"
+            - name: TOPIC_FILTERS
+              value: "factory/+/sensor/#"
+            - name: AUDIT_TOPIC_PREFIX
+              value: "_audit/counts"
+            - name: QOS
+              value: "1"
+            - name: WINDOW_SECONDS
+              value: "5"
+            - name: LATENESS_SECONDS
+              value: "20"
+            - name: EVENT_TIME_JSON_FIELD
+              value: "timestamp"
+            - name: EVENT_TIME_FORMAT
+              value: "rfc3339"  # or unix_ms / unix_s
+            - name: HEALTH_ADDR
+              value: ":8080"
+            - name: MQTT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mqtt-credentials
+                  key: username
+            - name: MQTT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mqtt-credentials
+                  key: password
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mqtt-credentials
+stringData:
+  username: "mqtt_user"
+  password: "mqtt_pass"

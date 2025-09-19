@@ -1,0 +1,11 @@
+jobmanager.rpc.address: flink-jobmanager
+rest.port: 8081
+parallelism.default: 1
+state.backend: hashmap
+
+# Enable Prometheus metrics
+metrics.reporter.prom.class: org.apache.flink.metrics.prometheus.PrometheusReporter
+metrics.reporter.prom.port: 9249-9253
+metrics.reporter.prom.interval: 10 SECONDS
+
+# Expose JM/TM metrics (ports must be published in composition)

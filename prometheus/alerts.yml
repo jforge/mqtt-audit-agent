@@ -1,0 +1,11 @@
+groups:
+  - name: audit-mismatch
+    rules:
+      - alert: MQTTIngestionLossDetected
+        expr: increase(kafka_topic_partition_current_offset{topic="audit_mismatches"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit mismatch messages are being produced"
+          description: "Flink detected one or more window count mismatches in the last 5 minutes. Investigate ingestion path."
