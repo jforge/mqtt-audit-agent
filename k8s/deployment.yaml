@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: agent
-          image: ghcr.io/your-org/mqtt-audit-agent:latest
+          image: ghcr.io/jforge/mqtt-audit-agent:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: BROKER_URL

@@ -5,9 +5,9 @@ A minimal Go service that subscribes to MQTT topics, counts messages in **event-
 ## Build & Push
 ```bash
   # build
-docker build -t ghcr.io/your-org/mqtt-audit-agent:latest .
+docker build -t ghcr.io/jforge/mqtt-audit-agent:latest .
 # push
-docker push ghcr.io/your-org/mqtt-audit-agent:latest
+docker push ghcr.io/jforge/mqtt-audit-agent:latest
 ```
 
 ## Deploy

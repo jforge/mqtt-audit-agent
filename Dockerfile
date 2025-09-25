@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
