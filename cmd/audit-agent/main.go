@@ -1,4 +1,3 @@
-// File: cmd/audit-agent/main.go
 package main
 
 import (
@@ -197,10 +196,34 @@ func main() {
 	crcMu := &sync.Mutex{}
 	rollingCRC := make(map[string]map[int64]hash.Hash)
 
-	// message handler
-	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+	// Message deduplication - only dedupe very recent duplicates
+	msgCache := make(map[string]time.Time)
+	cacheMu := &sync.Mutex{}
+
+	// Create the message handler function
+	messageHandler := func(client mqtt.Client, msg mqtt.Message) {
 		topic := msg.Topic()
 		payload := msg.Payload()
+		now := time.Now()
+
+		// Create a dedup key - shorter time window for true duplicates
+		dedupKey := fmt.Sprintf("%s:%s", topic, string(payload))
+
+		cacheMu.Lock()
+		if lastSeen, exists := msgCache[dedupKey]; exists && now.Sub(lastSeen) < 1*time.Millisecond {
+			cacheMu.Unlock()
+			// log.Printf("DEBUG: DUPLICATE message detected (within 1ms), skipping: topic=%s", topic)
+			return
+		}
+		msgCache[dedupKey] = now
+		// Clean old entries (keep only last 10 seconds)
+		for k, v := range msgCache {
+			if now.Sub(v) > 10*time.Second {
+				delete(msgCache, k)
+			}
+		}
+		cacheMu.Unlock()
+
 		evt, ok := extractEventTime(payload, cfg.EventTimeJSONField, cfg.EventTimeFormat)
 		if !ok {
 			// fallback to receive time
@@ -237,7 +260,7 @@ func main() {
 			}
 		}
 		msg.Ack() // no-op for paho v3, safe
-	})
+	}
 
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
@@ -245,9 +268,9 @@ func main() {
 	}
 	log.Printf("connected to broker")
 
-	// subscribe to filters
+	// subscribe to filters with the specific handler
 	for _, f := range cfg.TopicFilters {
-		if t := client.Subscribe(f, cfg.QoS, nil); t.Wait() && t.Error() != nil {
+		if t := client.Subscribe(f, cfg.QoS, messageHandler); t.Wait() && t.Error() != nil {
 			log.Fatalf("subscribe %s failed: %v", f, t.Error())
 		}
 		log.Printf("subscribed %q", f)
