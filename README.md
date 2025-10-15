@@ -94,7 +94,7 @@ Window: [12:00:00 - 12:00:05)
 ```
 
 
-### Why It's needed
+### Why it's necessary
 
 **Late-arriving messages**: In distributed systems, messages can arrive out of order due to:
 - Network delays
@@ -112,7 +112,7 @@ Window: [12:00:00 - 12:00:05)
 
 ```yaml
 - name: LATENESS_SECONDS
-  value: "20"  # Wait 20 seconds after window ends before publishing
+  value: "20"  # Wait 20 seconds after a window ends before publishing
 ```
 
 **Trade-offs**:

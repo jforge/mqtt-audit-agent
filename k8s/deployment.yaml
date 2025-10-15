@@ -5,7 +5,7 @@ metadata:
   labels:
     app: mqtt-audit-agent
 spec:
-  replicas: 1
+  replicas: 3  # Scale as needed
   selector:
     matchLabels:
       app: mqtt-audit-agent
@@ -22,15 +22,21 @@ spec:
             - name: BROKER_URL
               value: "tcp://mqtt-broker.default.svc.cluster.local:1883"
             - name: CLIENT_ID
-              value: "audit-agent-1"
+              value: "audit-agent-$(POD_NAME)"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: TOPIC_FILTERS
               value: "factory/+/sensor/#"
+            - name: SHARE_GROUP
+              value: "audit-cluster"  # Shared subscription group
             - name: AUDIT_TOPIC_PREFIX
               value: "_audit/counts"
             - name: QOS
               value: "1"
             - name: WINDOW_SECONDS
-              value: "5"
+              value: "300"
             - name: LATENESS_SECONDS
               value: "20"
             - name: EVENT_TIME_JSON_FIELD

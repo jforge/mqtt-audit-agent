@@ -26,6 +26,8 @@ type Config struct {
 	Username           string   // optional
 	Password           string   // optional
 	TopicFilters       []string // comma-separated list in env
+	ShareGroup         string   // shared subscription group name
+	MQTTVersion        string   // optional, default "5"
 	AuditTopicPrefix   string   // e.g. _audit/counts
 	QoS                byte     // 0/1 (recommend 1)
 	WindowSeconds      int      // tumbling window size in seconds (e.g., 5)
@@ -45,6 +47,8 @@ func getenv(key, def string) string {
 
 func loadConfig() Config {
 	topics := getenv("TOPIC_FILTERS", "#")
+	shareGroup := getenv("SHARE_GROUP", "")
+	mqttVersion := getenv("MQTT_VERSION", "5")
 	qos := byte(1)
 	if getenv("QOS", "1") == "0" {
 		qos = 0
@@ -57,12 +61,26 @@ func loadConfig() Config {
 	if v := getenv("LATENESS_SECONDS", "20"); v != "" {
 		fmt.Sscanf(v, "%d", &ls)
 	}
+	topicFilters := splitAndTrim(topics)
+
+	// Convert to shared subscriptions if share group is specified
+	if shareGroup != "" {
+		log.Printf("Using shared subscriptions with group: %s", shareGroup)
+		for i, topic := range topicFilters {
+			if !strings.HasPrefix(topic, "$share/") {
+				topicFilters[i] = fmt.Sprintf("$share/%s/%s", shareGroup, topic)
+				log.Printf("Converted topic '%s' to shared subscription '%s'", topic, topicFilters[i])
+			}
+		}
+	}
+
 	return Config{
 		BrokerURL:          getenv("BROKER_URL", "tcp://localhost:1883"),
 		ClientID:           getenv("CLIENT_ID", "audit-agent-1"),
 		Username:           os.Getenv("MQTT_USERNAME"),
 		Password:           os.Getenv("MQTT_PASSWORD"),
-		TopicFilters:       splitAndTrim(topics),
+		TopicFilters:       topicFilters,
+		ShareGroup:         shareGroup,
 		AuditTopicPrefix:   getenv("AUDIT_TOPIC_PREFIX", "_audit/counts"),
 		QoS:                qos,
 		WindowSeconds:      ws,
@@ -70,6 +88,7 @@ func loadConfig() Config {
 		EventTimeJSONField: getenv("EVENT_TIME_JSON_FIELD", "timestamp"),
 		EventTimeFormat:    getenv("EVENT_TIME_FORMAT", "rfc3339"),
 		HealthAddr:         getenv("HEALTH_ADDR", ":8080"),
+		MQTTVersion:        mqttVersion,
 	}
 }
 
@@ -86,6 +105,17 @@ func splitAndTrim(s string) []string {
 		return []string{"#"}
 	}
 	return out
+}
+
+// Extract the original topic filter from the shared subscription format
+func extractTopicFromSharedSub(sharedSub string) string {
+	if strings.HasPrefix(sharedSub, "$share/") {
+		parts := strings.SplitN(sharedSub, "/", 3)
+		if len(parts) >= 3 {
+			return parts[2] // Return the actual topic part
+		}
+	}
+	return sharedSub
 }
 
 // Window key per topic-filter
@@ -155,6 +185,7 @@ type summary struct {
 	WindowEnd     time.Time `json:"window_end"`
 	Count         int64     `json:"count"`
 	AgentID       string    `json:"agent_id"`
+	ShareGroup    string    `json:"share_group,omitempty"`
 	WatermarkSeen time.Time `json:"watermark_seen"`
 	// Optional lightweight checksum to detect content duplication/corruption in-window
 	PayloadCRC string `json:"payload_crc,omitempty"`
@@ -162,7 +193,8 @@ type summary struct {
 
 func main() {
 	cfg := loadConfig()
-	log.Printf("starting audit-agent; broker=%s topics=%v window=%ds grace=%ds qos=%d", cfg.BrokerURL, cfg.TopicFilters, cfg.WindowSeconds, cfg.LatenessSeconds, cfg.QoS)
+	log.Printf("starting audit-agent; broker=%s topics=%v window=%ds grace=%ds qos=%d share_group=%s",
+		cfg.BrokerURL, cfg.TopicFilters, cfg.WindowSeconds, cfg.LatenessSeconds, cfg.QoS, cfg.ShareGroup)
 
 	// health server
 	go func() {
@@ -176,13 +208,39 @@ func main() {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(cfg.BrokerURL)
 	opts.SetClientID(cfg.ClientID)
+
+	// Configure MQTT protocol version
+	switch cfg.MQTTVersion {
+	case "5", "5.0", "mqtt5":
+		opts.SetProtocolVersion(5) // MQTT 5.0
+		log.Printf("Using MQTT 5.0 protocol")
+	case "3.1.1", "mqtt311":
+		opts.SetProtocolVersion(4) // MQTT 3.1.1
+		log.Printf("Using MQTT 3.1.1 protocol")
+	case "3.1", "mqtt31":
+		opts.SetProtocolVersion(3) // MQTT 3.1
+		log.Printf("Using MQTT 3.1 protocol")
+	default:
+		opts.SetProtocolVersion(4) // Default to MQTT 5.0
+		log.Printf("Using default MQTT 5.0 protocol")
+	}
+
 	if cfg.Username != "" {
 		opts.SetUsername(cfg.Username)
 	}
 	if cfg.Password != "" {
 		opts.SetPassword(cfg.Password)
 	}
-	opts.SetCleanSession(false) // persistent session
+
+	// For shared subscriptions, we might want to consider clean sessions
+	// to avoid stale subscriptions, but persistent sessions are still valuable for QoS 1
+	if cfg.ShareGroup != "" {
+		opts.SetCleanSession(false) // Keep persistent for reliability
+		log.Printf("Using persistent session with shared subscriptions")
+	} else {
+		opts.SetCleanSession(false) // persistent session
+	}
+
 	opts.SetOrderMatters(false)
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
@@ -231,16 +289,21 @@ func main() {
 		}
 		// compute window start aligned to epoch
 		wStart := evt.Truncate(window)
+
 		// increment all matching filters
 		for _, f := range cfg.TopicFilters {
-			if matchesFilter(f, topic) {
-				st.incr(f, wStart, evt)
+			// Extract the original topic pattern for matching
+			originalPattern := extractTopicFromSharedSub(f)
+
+			if matchesFilter(originalPattern, topic) {
+				// Store using the original pattern for consistent aggregation
+				st.incr(originalPattern, wStart, evt)
 				// optional crc update
 				crcMu.Lock()
-				m, ok := rollingCRC[f]
+				m, ok := rollingCRC[originalPattern]
 				if !ok {
 					m = make(map[int64]hash.Hash)
-					rollingCRC[f] = m
+					rollingCRC[originalPattern] = m
 				}
 				key := wStart.Unix()
 				h, ok := m[key]
@@ -290,6 +353,10 @@ func main() {
 			for i := range due {
 				s := &due[i]
 				s.AgentID = cfg.ClientID
+				if cfg.ShareGroup != "" {
+					s.ShareGroup = cfg.ShareGroup
+				}
+
 				// attach CRC if present
 				crcMu.Lock()
 				if m, ok := rollingCRC[s.TopicPattern]; ok {
@@ -304,14 +371,23 @@ func main() {
 				}
 				crcMu.Unlock()
 
-				pubTopic := auditTopic(cfg.AuditTopicPrefix, s.TopicPattern)
+				// For shared subscriptions, include agent_id in a topic to avoid conflicts
+				var pubTopic string
+				if cfg.ShareGroup != "" {
+					pubTopic = auditTopicWithAgent(cfg.AuditTopicPrefix, s.TopicPattern, cfg.ClientID)
+				} else {
+					pubTopic = auditTopic(cfg.AuditTopicPrefix, s.TopicPattern)
+				}
+
 				b, _ := json.Marshal(s)
 				token := client.Publish(pubTopic, cfg.QoS, false, b)
 				token.Wait()
 				if err := token.Error(); err != nil {
 					log.Printf("publish audit failed: %v", err)
 				} else {
-					log.Printf("audit %s w=[%s,%s) count=%d", s.TopicPattern, s.WindowStart.Format(time.RFC3339), s.WindowEnd.Format(time.RFC3339), s.Count)
+					log.Printf("audit %s w=[%s,%s) count=%d (agent: %s)",
+						s.TopicPattern, s.WindowStart.Format(time.RFC3339), s.WindowEnd.Format(time.RFC3339),
+						s.Count, s.AgentID)
 				}
 			}
 		case <-ctx.Done():
@@ -329,6 +405,14 @@ func auditTopic(prefix, filter string) string {
 	t = strings.ReplaceAll(t, "+", "plus")
 	t = strings.ReplaceAll(t, "#", "hash")
 	return fmt.Sprintf("%s/%s", strings.TrimSuffix(prefix, "/"), t)
+}
+
+func auditTopicWithAgent(prefix, filter, agentID string) string {
+	// Include agent ID for shared subscription scenarios
+	t := strings.ReplaceAll(filter, "/", "_")
+	t = strings.ReplaceAll(t, "+", "plus")
+	t = strings.ReplaceAll(t, "#", "hash")
+	return fmt.Sprintf("%s/%s/%s", strings.TrimSuffix(prefix, "/"), t, agentID)
 }
 
 func extractEventTime(payload []byte, field, format string) (time.Time, bool) {
